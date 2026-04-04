@@ -205,12 +205,15 @@ get_next_story() {
     # Priority 3: ready-for-dev (start new work only if nothing pending)
     [ -z "$line" ] && line=$(grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(ready-for-dev|\"ready-for-dev\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
 
+    # Priority 4: backlog (needs story creation first via /gds-create-story)
+    [ -z "$line" ] && line=$(grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(backlog|\"backlog\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
+
     [ -z "$line" ] && return
     extract_story_key "$line"
 }
 
 count_remaining() {
-    grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(ready-for-dev|in-progress|review)" "$SPRINT_STATUS" 2>/dev/null | wc -l | tr -d ' '
+    grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(backlog|ready-for-dev|in-progress|review)" "$SPRINT_STATUS" 2>/dev/null | wc -l | tr -d ' '
 }
 
 # Extract epic number from story key (e.g., "3-2-feature" -> "3")
@@ -612,7 +615,11 @@ run_workflow() {
         local prompt
         local is_resume=""
         if [ $continue_count -eq 0 ]; then
-            prompt="Execute /bmad:bmm:workflows:$workflow for story: $story_key. Story file: $story_file. IMPORTANT: Work 100% autonomously - do NOT ask questions, do NOT wait for confirmation, make all decisions yourself. Continue until story status is $expected_status."
+            if [ "$workflow" = "create-story" ]; then
+                prompt="Execute /gds-create-story $story_key. IMPORTANT: Work 100% autonomously - do NOT ask questions, do NOT wait for confirmation, make all decisions yourself. Continue until story status is $expected_status."
+            else
+                prompt="Execute /bmad:bmm:workflows:$workflow for story: $story_key. Story file: $story_file. IMPORTANT: Work 100% autonomously - do NOT ask questions, do NOT wait for confirmation, make all decisions yourself. Continue until story status is $expected_status."
+            fi
         else
             prompt="continue"
             is_resume="true"
@@ -953,6 +960,14 @@ while [ "$INFINITE_MODE" = true ] || [ $ITERATION -lt $MAX_ITERATIONS ]; do
     # Track story timing
     STORY_START_TIME=$(date +%s)
     STORY_COST=0
+
+    # Phase 0: create-story (if backlog, create story file first)
+    if [ "$STORY_STATUS" = "backlog" ]; then
+        echo -e "${CYAN}>>> Story in backlog - creating story file via /gds-create-story...${NC}"
+        run_workflow "$NEXT_STORY" "create-story" "ready-for-dev"
+        STORY_COST=$(echo "$STORY_COST + $LAST_RUN_COST" | bc 2>/dev/null || echo "$LAST_RUN_COST")
+        STORY_STATUS=$(get_story_status "$NEXT_STORY")
+    fi
 
     # Phase 1: dev-story
     if [ "$STORY_STATUS" = "ready-for-dev" ] || [ "$STORY_STATUS" = "in-progress" ]; then
