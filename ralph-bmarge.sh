@@ -21,6 +21,7 @@ INFINITE_MODE=true
 MAX_ITERATIONS=0
 MAX_CONTINUES=0
 MAX_STALE_CONTINUES=10  # Safety: abort if status unchanged after N continues
+EPIC_FILTER=""
 WEBHOOK_URL=""
 NOTIFY_SOUND=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-continues)
             MAX_CONTINUES="$2"
+            shift 2
+            ;;
+        --epic)
+            EPIC_FILTER="$2"
             shift 2
             ;;
         --max-stale)
@@ -111,6 +116,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --dry-run, -n          Simulation mode (no Claude calls)"
             echo "  --validate, -v         Validate story detection and exit"
             echo "  --debug, -d            Debug mode: full visibility (prompts, output, timing)"
+            echo "  --epic N               Only process stories from Epic N"
             echo "  --max-iterations N     Limit to N story iterations (default: infinite)"
             echo "  --max-continues N      Limit resume attempts per workflow (default: infinite)"
             echo "  --max-stale N          Abort if status unchanged after N continues (default: 10)"
@@ -120,6 +126,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --help, -h             Show this help"
             echo ""
             echo "Examples:"
+            echo "  $0 --epic 7                    Run only stories from Epic 7"
             echo "  $0                              Run until all stories complete (default)"
             echo "  $0 --max-iterations 5          Run max 5 stories then stop"
             echo "  $0 --webhook https://hooks...  Send notifications to Slack/Discord"
@@ -195,25 +202,29 @@ get_story_status() {
 get_next_story() {
     local line
     local story
+    local epic_prefix="[0-9]+"
+    [ -n "$EPIC_FILTER" ] && epic_prefix="$EPIC_FILTER"
 
     # Priority 1: in-progress (FINISH what was started first!)
-    line=$(grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(in-progress|\"in-progress\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
+    line=$(grep -E "^[[:space:]]+${epic_prefix}-[0-9]+-[^:]+:[[:space:]]*(in-progress|\"in-progress\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
 
     # Priority 2: review (complete the review phase)
-    [ -z "$line" ] && line=$(grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(review|\"review\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
+    [ -z "$line" ] && line=$(grep -E "^[[:space:]]+${epic_prefix}-[0-9]+-[^:]+:[[:space:]]*(review|\"review\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
 
     # Priority 3: ready-for-dev (start new work only if nothing pending)
-    [ -z "$line" ] && line=$(grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(ready-for-dev|\"ready-for-dev\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
+    [ -z "$line" ] && line=$(grep -E "^[[:space:]]+${epic_prefix}-[0-9]+-[^:]+:[[:space:]]*(ready-for-dev|\"ready-for-dev\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
 
     # Priority 4: backlog (needs story creation first via /gds-create-story)
-    [ -z "$line" ] && line=$(grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(backlog|\"backlog\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
+    [ -z "$line" ] && line=$(grep -E "^[[:space:]]+${epic_prefix}-[0-9]+-[^:]+:[[:space:]]*(backlog|\"backlog\")" "$SPRINT_STATUS" 2>/dev/null | head -1)
 
     [ -z "$line" ] && return
     extract_story_key "$line"
 }
 
 count_remaining() {
-    grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*(backlog|ready-for-dev|in-progress|review)" "$SPRINT_STATUS" 2>/dev/null | wc -l | tr -d ' '
+    local epic_prefix="[0-9]+"
+    [ -n "$EPIC_FILTER" ] && epic_prefix="$EPIC_FILTER"
+    grep -E "^[[:space:]]+${epic_prefix}-[0-9]+-[^:]+:[[:space:]]*(backlog|ready-for-dev|in-progress|review)" "$SPRINT_STATUS" 2>/dev/null | wc -l | tr -d ' '
 }
 
 # Extract epic number from story key (e.g., "3-2-feature" -> "3")
@@ -815,14 +826,18 @@ if [ "$VALIDATE_MODE" = true ]; then
     echo ""
 
     echo -e "${CYAN}Sprint Status File:${NC} $SPRINT_STATUS"
+    [ -n "$EPIC_FILTER" ] && echo -e "${CYAN}Epic Filter:${NC} Epic $EPIC_FILTER only"
     echo ""
 
     # Show all detected stories by status
+    validate_epic_prefix="[0-9]+"
+    [ -n "$EPIC_FILTER" ] && validate_epic_prefix="$EPIC_FILTER"
+
     echo -e "${YELLOW}═══ Stories by Status ═══${NC}"
     echo ""
 
     for status in "ready-for-dev" "in-progress" "review" "done"; do
-        count=$(grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*${status}" "$SPRINT_STATUS" 2>/dev/null | wc -l | tr -d ' ')
+        count=$(grep -E "^[[:space:]]+${validate_epic_prefix}-[0-9]+-[^:]+:[[:space:]]*${status}" "$SPRINT_STATUS" 2>/dev/null | wc -l | tr -d ' ')
         if [ "$count" -gt 0 ]; then
             case $status in
                 ready-for-dev) color=$GREEN ;;
@@ -831,7 +846,7 @@ if [ "$VALIDATE_MODE" = true ]; then
                 done) color=$NC ;;
             esac
             echo -e "${color}[$status] ($count stories)${NC}"
-            grep -E "^[[:space:]]+[0-9]+-[0-9]+-[^:]+:[[:space:]]*${status}" "$SPRINT_STATUS" 2>/dev/null | while read line; do
+            grep -E "^[[:space:]]+${validate_epic_prefix}-[0-9]+-[^:]+:[[:space:]]*${status}" "$SPRINT_STATUS" 2>/dev/null | while read line; do
                 story=$(extract_story_key "$line")
                 epic=$(get_epic_from_story "$story")
                 story_file="$STORIES_DIR/${story}.md"
@@ -899,6 +914,7 @@ if [ "$REMAINING" -eq 0 ]; then
 fi
 
 echo "Stories remaining: $REMAINING"
+[ -n "$EPIC_FILTER" ] && echo -e "Epic filter: ${CYAN}Epic $EPIC_FILTER only${NC}"
 if [ "$INFINITE_MODE" = true ]; then
     echo "Mode: infinite (until all stories complete)"
 else
